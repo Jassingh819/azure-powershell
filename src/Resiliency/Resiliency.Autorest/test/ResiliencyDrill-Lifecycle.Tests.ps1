@@ -16,7 +16,7 @@ if(($null -eq $TestName) -or ($TestName -contains 'ResiliencyDrill-Management') 
 
 Describe 'ResiliencyDrill-Management' {
     BeforeAll {
-        $script:serviceGroupName = $env.ServiceGroupName
+        $script:serviceGroupName = $env.DrillServiceGroupName
         $script:drillName = $env.DrillName
         $script:drillResourceName = $env.DrillResourceName
         $script:subscriptionId = $env.SubscriptionId
@@ -24,7 +24,7 @@ Describe 'ResiliencyDrill-Management' {
         $script:drillResourceId = $env.DrillResourceId
 
         $requiredEnvironment = @(
-            'ServiceGroupName', 'DrillName', 'SubscriptionId', 'HealthModelId'
+            'DrillServiceGroupName', 'DrillName', 'SubscriptionId', 'HealthModelId'
         )
         if ([string]::IsNullOrWhiteSpace($script:assetResourceId)) { throw 'Live/record fixture did not expose a workload asset resource ID.' }
         foreach ($name in $requiredEnvironment) {
@@ -92,7 +92,6 @@ Describe 'ResiliencyDrill-Management' {
     It 'resyncs readiness' {
         Update-ResiliencyRecordingAccessToken
         $operationId = (New-Guid).Guid
-        $operationIdQueryStep = New-ResiliencyOperationIdQueryStep -OperationId $operationId
         $result = Invoke-WithServiceGroupRbacRetry {
             $parameters = @{
                 DrillName = $script:drillName
@@ -100,8 +99,6 @@ Describe 'ResiliencyDrill-Management' {
                 OperationId = $operationId
                 NoWait = $true
             }
-            # Keep the recorder at the front; apply the service query workaround only on the wire.
-            if ($operationIdQueryStep) { $parameters.HttpPipelineAppend = $operationIdQueryStep }
             Sync-AzResiliencyDrillReadiness @parameters
         }
         $result | Should -Not -BeNullOrEmpty
@@ -123,10 +120,9 @@ Describe 'ResiliencyDrill-Management' {
         }
         Update-ResiliencyRecordingAccessToken
         $operationId = (New-Guid).Guid
-        $operationIdQueryStep = New-ResiliencyOperationIdQueryStep -OperationId $operationId
         $result = Invoke-WithServiceGroupRbacRetry {
             Update-AzResiliencyDrillResource -DrillName $script:drillName -ServiceGroupName $script:serviceGroupName `
-                -OperationId $operationId -HttpPipelineAppend $operationIdQueryStep -FaultDurationInMin 5 -NoWait `
+                -OperationId $operationId -FaultDurationInMin 5 -NoWait `
                 -ResourceListIncludeResource @(@{ Id = $script:drillResourceId })
         }
         $result | Should -Not -BeNullOrEmpty
@@ -145,10 +141,9 @@ Describe 'ResiliencyDrill-Management' {
     It 'validates execution readiness' {
         Update-ResiliencyRecordingAccessToken
         $operationId = (New-Guid).Guid
-        $operationIdQueryStep = New-ResiliencyOperationIdQueryStep -OperationId $operationId
         Invoke-WithServiceGroupRbacRetry {
             Test-AzResiliencyDrillExecutionValidation -DrillName $script:drillName `
-                -ServiceGroupName $script:serviceGroupName -OperationId $operationId -HttpPipelineAppend $operationIdQueryStep `
+                -ServiceGroupName $script:serviceGroupName -OperationId $operationId `
                 -ValidateForExecutionPropertySourceLocation @("$($env.location)-az1") -ErrorAction Stop
         } | Out-Null
         # The cmdlet intentionally enumerates drillResourceQualifications rather than returning the
@@ -220,7 +215,7 @@ Describe 'ResiliencyDrill-Lifecycle-LiveOnly' -Tag 'LiveOnly' {
     }
 
     BeforeAll {
-        $script:serviceGroupName = $env.ServiceGroupName
+        $script:serviceGroupName = $env.DrillServiceGroupName
         $script:drillName = $env.DrillName
         $script:assetResourceId = if ($env.AssetResourceId) { $env.AssetResourceId } else { $env.NsgId }
         $script:preparedTransitionFixture = [bool]$env.preparedTransitionFixture
@@ -229,7 +224,7 @@ Describe 'ResiliencyDrill-Lifecycle-LiveOnly' -Tag 'LiveOnly' {
         if ($TestMode -notin @('live', 'record') -or $script:preparedTransitionFixture) { return }
 
         $requiredEnvironment = @(
-            'ServiceGroupName', 'DrillName'
+            'DrillServiceGroupName', 'DrillName'
         )
         if ([string]::IsNullOrWhiteSpace($script:assetResourceId)) {
             throw 'DrillRun fixture did not expose a workload asset resource ID.'
@@ -280,9 +275,8 @@ Describe 'ResiliencyDrill-Lifecycle-LiveOnly' -Tag 'LiveOnly' {
         if (-not $drill) { return }
         if ($drill.ExecutionState -ne 'NotRunning') {
             $operationId = (New-Guid).Guid
-            $operationIdQueryStep = New-ResiliencyOperationIdQueryStep -OperationId $operationId
             $end = Stop-AzResiliencyDrill -ServiceGroupName $script:serviceGroupName -Name $script:drillName `
-                -OperationId $operationId -HttpPipelineAppend $operationIdQueryStep -Attestation Failure `
+                -OperationId $operationId -Attestation Failure `
                 -AttestationNote 'Cleaning up an incomplete test-owned drill; no recovery transition was requested.' `
                 -NoWait -ErrorAction Stop
             (Wait-ResiliencyAsyncOperation -Operation $end) | Should -Be $true
@@ -302,9 +296,8 @@ Describe 'ResiliencyDrill-Lifecycle-LiveOnly' -Tag 'LiveOnly' {
         $existingRunNames.Count | Should -Be 0
         $startIssuedAt = [DateTime]::UtcNow
         $startOperationId = (New-Guid).Guid
-        $operationIdQueryStep = New-ResiliencyOperationIdQueryStep -OperationId $startOperationId
         $start = Start-AzResiliencyDrill -ServiceGroupName $script:serviceGroupName -Name $script:drillName `
-            -OperationId $startOperationId -HttpPipelineAppend $operationIdQueryStep -NoWait -ErrorAction Stop
+            -OperationId $startOperationId -NoWait -ErrorAction Stop
         $start | Should -Not -BeNullOrEmpty
         (Wait-ResiliencyAsyncOperation -Operation $start) | Should -Be $true
         # Start returns an action response, not a run name. Prefer exact operation correlation when the
@@ -380,10 +373,9 @@ Describe 'ResiliencyDrill-Lifecycle-LiveOnly' -Tag 'LiveOnly' {
         if (Skip-DrillRunUnlessExecutable) { return }
         Update-ResiliencyRecordingAccessToken
         $operationId = (New-Guid).Guid
-        $operationIdQueryStep = New-ResiliencyOperationIdQueryStep -OperationId $operationId
         $note = "Azure PowerShell live lifecycle test: $operationId"
         Add-AzResiliencyDrillRunNote -DrillName $script:drillName -DrillRunName $script:drillRunName `
-            -ServiceGroupName $script:serviceGroupName -OperationId $operationId -HttpPipelineAppend $operationIdQueryStep `
+            -ServiceGroupName $script:serviceGroupName -OperationId $operationId `
             -Note $note | Should -Not -BeNullOrEmpty
         Wait-DrillRunState -TimeoutSeconds 120 -Predicate {
             param($candidate)
@@ -521,9 +513,8 @@ Describe 'ResiliencyDrill-Lifecycle-LiveOnly' -Tag 'LiveOnly' {
         if (Skip-DrillRunUnlessExecutable) { return }
         Update-ResiliencyRecordingAccessToken
         $operationId = (New-Guid).Guid
-        $operationIdQueryStep = New-ResiliencyOperationIdQueryStep -OperationId $operationId
         New-AzResiliencyDrillRunReport -DrillName $script:drillName -DrillRunName $script:drillRunName `
-            -ServiceGroupName $script:serviceGroupName -OperationId $operationId -HttpPipelineAppend $operationIdQueryStep | Should -Not -BeNullOrEmpty
+            -ServiceGroupName $script:serviceGroupName -OperationId $operationId | Should -Not -BeNullOrEmpty
     }
 
     It 'gets the report download URL' {
@@ -532,10 +523,9 @@ Describe 'ResiliencyDrill-Lifecycle-LiveOnly' -Tag 'LiveOnly' {
         for ($attempt = 0; $attempt -lt 40 -and -not $download; $attempt++) {
             Update-ResiliencyRecordingAccessToken
             $operationId = (New-Guid).Guid
-            $operationIdQueryStep = New-ResiliencyOperationIdQueryStep -OperationId $operationId
             try {
                 $download = Get-AzResiliencyDrillRunReportDownloadUrl -DrillName $script:drillName -DrillRunName $script:drillRunName `
-                    -ServiceGroupName $script:serviceGroupName -OperationId $operationId -HttpPipelineAppend $operationIdQueryStep -Format Html -ErrorAction Stop
+                    -ServiceGroupName $script:serviceGroupName -OperationId $operationId -Format Html -ErrorAction Stop
             } catch {
                 if ($attempt -eq 39) { throw }
                 Start-TestSleep -Seconds 15
@@ -548,10 +538,9 @@ Describe 'ResiliencyDrill-Lifecycle-LiveOnly' -Tag 'LiveOnly' {
         if (Skip-DrillRunUnlessExecutable) { return }
         Update-ResiliencyRecordingAccessToken
         $operationId = (New-Guid).Guid
-        $operationIdQueryStep = New-ResiliencyOperationIdQueryStep -OperationId $operationId
         $attestation = if ($script:preparedTransitionFixture) { 'Success' } else { 'Failure' }
         $stop = Stop-AzResiliencyDrill -ServiceGroupName $script:serviceGroupName -Name $script:drillName `
-            -OperationId $operationId -HttpPipelineAppend $operationIdQueryStep -Attestation $attestation `
+            -OperationId $operationId -Attestation $attestation `
             -AttestationNote 'Ending the cmdlet test run; no recovery transition was requested by the lightweight NSG scenario.' `
             -NoWait -ErrorAction Stop
         $stop | Should -Not -BeNullOrEmpty
