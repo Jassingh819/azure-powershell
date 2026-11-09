@@ -441,6 +441,91 @@ function setupResiliencyEnv() {
     set-content -Path (Join-Path $PSScriptRoot $envFile) -Value (ConvertTo-Json $env)
 }
 
+function Update-ResiliencyRecordingAccessToken {
+    if ($TestMode -ne 'record') { return }
+
+    $targetSubscription = $env.SubscriptionId
+    $token = & az account get-access-token --subscription $targetSubscription --resource 'https://management.azure.com/' --query accessToken -o tsv
+    if ($LASTEXITCODE -ne 0 -or -not $token) { throw 'Unable to refresh Azure CLI ARM token for PowerShell Drill recording fixture.' }
+    $accountId = & az account show --subscription $targetSubscription --query user.name -o tsv
+    $tenantId = & az account show --subscription $targetSubscription --query tenantId -o tsv
+    Connect-AzAccount -AccessToken $token -AccountId $accountId -Tenant $tenantId -Subscription $targetSubscription -SkipValidation -Force | Out-Null
+    $token = $null
+}
+
+function New-ResiliencyOperationIdQueryStep {
+    param([Parameter(Mandatory)] [string]$OperationId)
+
+    if ($TestMode -ne 'record') { return $null }
+
+    return [Microsoft.Azure.PowerShell.Cmdlets.Resiliency.Runtime.SendAsyncStep]{
+        param($request, $callback, $next)
+        $builder = [System.UriBuilder]::new($request.RequestUri)
+        $separator = if ([string]::IsNullOrEmpty($builder.Query)) { '' } else { '&' }
+        $query = $builder.Query.TrimStart('?')
+        $builder.Query = "$query$separator`operationId=$([uri]::EscapeDataString($OperationId))"
+        $request.RequestUri = $builder.Uri
+        return $next.SendAsync($request, $callback)
+    }.GetNewClosure()
+}
+
+function Wait-ResiliencyAsyncOperation {
+    param([Parameter(Mandatory)] $Operation)
+
+    if ($TestMode -ne 'record') { return }
+
+    $target = $Operation.Target
+    if ([string]::IsNullOrWhiteSpace($target)) { throw 'Async operation response did not include a polling target.' }
+    $deadline = [DateTimeOffset]::UtcNow.AddMinutes(20)
+    do {
+        Update-ResiliencyRecordingAccessToken
+        $response = Invoke-AzRestMethod -Method GET -Uri $target
+        $status = ($response.Content | ConvertFrom-Json).status
+        if ($status -eq 'Succeeded') { return $true }
+        if ($status -in @('Failed','Canceled')) { throw "Async operation entered $status`: $($response.Content)" }
+        if ([DateTimeOffset]::UtcNow -ge $deadline) { return $false }
+        Start-Sleep -Seconds 10
+    } while ($true)
+}
+
+function Wait-DrillResourceDiscovery {
+    param([Parameter(Mandatory)] [string]$ServiceGroupName,
+          [Parameter(Mandatory)] [string]$DrillName,
+          [Parameter(Mandatory)] [string]$ResourceId)
+
+    if ($TestMode -ne 'record') { return $null }
+
+    $path = "/providers/Microsoft.Management/serviceGroups/$ServiceGroupName/providers/Microsoft.AzureResilienceManagement/drills/$DrillName/drillResources?api-version=2026-10-01"
+    for ($attempt = 0; $attempt -lt 90; $attempt++) {
+        Update-ResiliencyRecordingAccessToken
+        $resources = Invoke-ResiliencyFixtureRequest GET $path
+        $resource = @($resources.value) | Where-Object { $_.properties.resourceId -eq $ResourceId } | Select-Object -First 1
+        if ($resource -and $resource.properties.provisioningState -eq 'Succeeded' -and $resource.properties.readinessState -eq 'Ready') {
+            return $resource
+        }
+        Start-Sleep -Seconds 10
+    }
+
+    throw "Timed out waiting for Drill '$DrillName' to discover ready resource '$ResourceId'."
+}
+
+function Wait-DrillResourceOperation {
+    param([Parameter(Mandatory)] [string]$ServiceGroupName,
+          [Parameter(Mandatory)] [string]$DrillName)
+
+    if ($TestMode -ne 'record') { return }
+
+    $path = "/providers/Microsoft.Management/serviceGroups/$ServiceGroupName/providers/Microsoft.AzureResilienceManagement/drills/$DrillName`?api-version=2026-10-01"
+    for ($attempt = 0; $attempt -lt 90; $attempt++) {
+        Update-ResiliencyRecordingAccessToken
+        $drill = Invoke-ResiliencyFixtureRequest GET $path
+        if ($drill.properties.attentionReason.includedResourceInDrill -eq 'Exists') { return }
+        Start-Sleep -Seconds 10
+    }
+
+    throw "Timed out waiting for Drill '$DrillName' resource inclusion to converge."
+}
+
 function Remove-ResiliencyFixtureChildren {
     param([string]$ListPath)
 
