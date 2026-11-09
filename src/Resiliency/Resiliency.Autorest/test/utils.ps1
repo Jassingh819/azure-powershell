@@ -441,6 +441,17 @@ function setupResiliencyEnv() {
     set-content -Path (Join-Path $PSScriptRoot $envFile) -Value (ConvertTo-Json $env)
 }
 
+function Invoke-WithServiceGroupRbacRetry {
+    param([Parameter(Mandatory)] [scriptblock]$Action)
+    for ($attempt = 0; $attempt -lt 10; $attempt++) {
+        try { return & $Action }
+        catch {
+            if ($_.Exception.Message -notmatch 'AuthorizationFailed' -or $attempt -eq 9) { throw }
+            Start-TestSleep -Seconds 30
+        }
+    }
+}
+
 function Update-ResiliencyRecordingAccessToken {
     if ($TestMode -ne 'record') { return }
 
